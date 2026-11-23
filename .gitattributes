@@ -1,0 +1,21 @@
+# 换行与二进制约定。
+#
+# .sh 强制 LF：在 Windows 上克隆后如果被改成 CRLF，macOS runner 上会直接
+# 报 "bad interpreter: /usr/bin/env: bash^M" —— 这个错误排查起来非常浪费时间。
+# .yml 同样归 LF，避免某些 YAML 解析器把 \r 当成内容。
+
+* text=auto
+
+*.sh    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.plist text eol=lf
+*.pbxproj text eol=lf
+*.swift text eol=lf
+*.md    text eol=lf
+*.json  text eol=lf
+
+*.png binary
+*.jpg binary
+*.jks binary
+*.ipa binary

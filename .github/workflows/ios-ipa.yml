@@ -1,0 +1,95 @@
+name: iOS IPA
+
+# 日常出包：手动触发，或 push 到 main 且改动涉及 iOS 工程 / 打包脚本。
+# 不依赖开发者证书，所以不需要配置任何 Secret 就能跑通。
+# 打 tag 发 Release 的流程在 ios-release.yml，那边复用同一个 scripts/build-ipa.sh。
+
+on:
+  workflow_dispatch:
+    inputs:
+      rebuild_web:
+        description: '从源码重建 Web 产物（node make-apk.mjs）；默认直接用仓库里的 android-www'
+        type: boolean
+        default: false
+      version:
+        description: '覆盖版本号（留空取 mobile/package.json）'
+        type: string
+        required: false
+  push:
+    branches: [main]
+    paths:
+      - 'mobile/ios/**'
+      - 'mobile/capacitor.config.ts'
+      - 'mobile/android-www/**'
+      - 'scripts/build-ipa.sh'
+      - '.github/workflows/ios-ipa.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build IPA (unsigned)
+    runs-on: macos-15
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Capacitor 8 需要较新的 Xcode；latest-stable 自动选镜像上最新的正式版
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Toolchain info
+        run: |
+          xcodebuild -version
+          swift --version
+          sw_vers
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # SPM 的本地包路径指向 node_modules 里的 @capacitor/app 与 @capacitor/keyboard，
+      # 这一步不能省：没有 node_modules，xcodebuild 解析依赖就会失败。
+      # 先 npm ci（严格按 lockfile），失败退回 npm install —— package.json 与
+      # lockfile 不同步时 npm ci 会直接拒绝，那不该拦住出包。
+      - name: Install dependencies
+        working-directory: mobile
+        run: |
+          npm ci --no-audit --no-fund || {
+            echo "::warning::npm ci 失败，退回 npm install（lockfile 可能与 package.json 不同步）"
+            npm install --no-audit --no-fund
+          }
+          node -e "console.log('@capacitor/cli', require('./node_modules/@capacitor/cli/package.json').version)"
+
+      # 默认直接用仓库里的 android-www（与打进 APK 的那份产物同源，行为已知）；
+      # 勾选 rebuild_web 才从源码重建，顺带验证源码能否复现该产物。
+      - name: Rebuild web bundle from source (optional)
+        if: inputs.rebuild_web
+        working-directory: mobile
+        run: node make-apk.mjs
+
+      - name: Build IPA
+        env:
+          VERSION: ${{ inputs.version }}
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: bash scripts/build-ipa.sh
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Agent2API-ipa-${{ github.run_number }}
+          path: |
+            build/out/*.ipa
+            build/out/build-info.json
+          if-no-files-found: error
+          retention-days: 30

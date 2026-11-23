@@ -1,0 +1,33 @@
+# 依赖
+node_modules/
+.pnpm-store/
+
+# 构建产物
+build/
+DerivedData/
+mobile/android/.gradle/
+mobile/android/build/
+mobile/android/app/build/
+*.xcarchive
+
+# iOS 生成物（cap copy / cap sync 的产物，每次构建重建）
+mobile/ios/App/App/public/
+mobile/ios/App/App/capacitor.config.json
+mobile/ios/App/App/config.xml
+mobile/ios/App/App.xcworkspace/xcuserdata/
+mobile/ios/App/Pods/
+xcuserdata/
+*.xcuserstate
+
+# 签名材料 —— 绝不入库
+*.jks
+*.keystore
+*.p12
+*.mobileprovision
+keystore.properties
+local.properties
+
+# 系统杂项
+.DS_Store
+Thumbs.db
+*.log
