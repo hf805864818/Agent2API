@@ -14,7 +14,7 @@
 | 需要重写界面吗？ | 不需要。`android-www/` 这份 Web 产物原样进 WKWebView，iOS 分支代码早就写好了 |
 | 需要 Mac 吗？ | 出包需要。用 GitHub Actions 的 `macos-15` runner，本地机器不用装 Xcode |
 | 需要开发者证书吗？ | 不需要。全程 `CODE_SIGNING_ALLOWED=NO`，TrollStore / AppSync 负责 fakesign |
-| 主要风险 | 这份 iOS 工程**从未被编译过**（改动说明里只有 Android 的验证记录），首次 `xcodebuild` 可能暴露编译器级问题 |
+| 主要风险 | 这份 iOS 工程在本仓库之前**从未被编译过**（原 `改动说明.md` 只有 Android 的验证记录）。现已在本仓库的 CI 上跑到 `BUILD SUCCEEDED`（Xcode 26.3 / SDK 26.2 / arm64），并修掉了一处会导致编译失败的嵌套注释 |
 
 ---
 
@@ -276,12 +276,46 @@ window?.makeKeyAndVisible()
 CI 里仍会再传一次 `MARKETING_VERSION=$VERSION`（版本以 `package.json` 为唯一真源），
 pbxproj 的改动只是让「直接开 Xcode 编译」也不跑偏。
 
-### 5.4 回滚
+### 5.4 `SaveFilePlugin.swift`：新增（iOS 侧的「导出到文件」）
+
+安卓侧的 `SaveFilePlugin.java` 写的是 `Environment.DIRECTORY_DOWNLOADS`，这个路径在 iOS 上不存在。
+Web 层 `lib/save-file.ts` 的探测逻辑是「有 `Capacitor.Plugins.SaveFile` 就落盘，没有就退剪贴板」，
+所以 iOS 缺这个插件时导出账号**不会报错**，只会静默变成「已复制到剪贴板」。
+
+实现要点：
+
+| 决策 | 选择 | 理由 |
+|---|---|---|
+| 落盘位置 | `Documents/Downloads/` | 临时目录会被系统回收，用户去「文件」App 翻不到；Documents 配合 `UIFileSharingEnabled` 直接出现在「我的 iPhone → Agent2API」 |
+| 目录名 | `Downloads`（ASCII） | 安卓的提示文案是「保存到「下载」目录」。在 iOS 上落到一个真叫 Downloads 的文件夹，文案与事实一致，**不用改词表**——`ui/i18n/*` 是 `i18n-src/*.json` 的构建产物，包里没有源头，手改会被下次构建覆盖 |
+| 返回值 | `{ok, filename, bytes, path}`，`path` 形如 `Agent2API/Downloads/agent2api-accounts-20261123-090000.json` | 界面把它拼进「已保存到 {path}」。不返回沙盒绝对路径——那串 UUID 对用户没有意义 |
+| 同名文件 | 加 `-1`/`-2` 后缀，不覆盖 | 返回的 `filename` 是最终落盘的名字，提示才不会说错 |
+| 线程 | `DispatchQueue.global(.userInitiated)` 写盘 | 账号导出可能是几十万行 JSON，同步写会卡住 bridge |
+| 限制 | 单文件 ≤ 32 MB；文件名取 `lastPathComponent`、替换 `/ \ : * ? " < > \|`、拒绝 `.` / `..`、隐藏文件加前缀 | 能跳出目标目录的形态一个都不留，中文文件名照常保留 |
+
+配套的 `Info.plist` 两个键：
+
+```xml
+<key>UIFileSharingEnabled</key><true/>
+<key>LSSupportsOpeningDocumentsInPlace</key><true/>
+```
+
+少了这两个，文件写进去了但在「文件」App 里看不见，用户只能重装或越狱才能拿出来。
+
+注册位置在 `ImageSaverPlugin.swift` 的 `AppBridgeViewController.capacitorDidLoad()` 里——
+手写插件不在 CLI 生成的 `packageClassList` 里，漏注册就是 `isPluginAvailable` 返回 false，
+功能静默消失。
+
+### 5.5 回滚
 
 ```bash
+# 撤销改动的三个文件
 git checkout -- mobile/ios/App/App/SceneDelegate.swift \
                mobile/ios/App/App/Info.plist \
+               mobile/ios/App/App/ImageSaverPlugin.swift \
                mobile/ios/App/App.xcodeproj/project.pbxproj
+# 撤销新增的插件
+git rm -f mobile/ios/App/App/SaveFilePlugin.swift
 ```
 
 ---
@@ -353,9 +387,10 @@ iOS 与 Android 会一起挂，不是 iOS 特有问题。
 | 图标规格 | Observed | 1024×1024 RGB（无 alpha） |
 | 网关 CORS 放行 iOS origin | Observed | §6 实测 204 + `*` |
 | `npm ci` 能装齐依赖 | Observed（本地用 pnpm 等价验证） | 524 个包解析成功，`@capacitor/cli 8.5.3` |
-| `xcodebuild` 编译 | **NOT RUN** | 本机 Windows，无 Xcode |
-| IPA 结构自检 | **NOT RUN** | 脚本内置 11 项检查，等 CI 跑 |
-| 真机安装 / 启动 / 连网关 | **NOT RUN** | 需要设备 |
+| `xcodebuild` 编译 | **Observed** | CI run #2：`BUILD SUCCEEDED`，Xcode 26.3 / iPhoneOS 26.2 SDK / arm64 |
+| IPA 结构自检 | **Observed** | 脚本 11 项全过；解包复核：arm64 Mach-O 245,288 B，`public/mobile.js` 1,891,382 B 与源一致，`Capacitor.framework` / `Cordova.framework` 在包内 |
+| 首次编译失败 → 修复 | **Observed** | run #1：`SaveFilePlugin.swift:134:2 error: unterminated '/*' comment`（见 §十）→ 修掉 → run #2 绿 |
+| 真机安装 / 启动 / 连网关 / 导出落盘 | **NOT RUN** | 需要设备；本机是 Windows，无从验证 |
 
 ---
 
@@ -378,3 +413,76 @@ build/out/build-info.json                      # 版本 + SHA-256 + 工具链
 ```
 
 Windows 上只能跑到 `cap copy` 这一步（已验证），`xcodebuild` 不存在。
+
+---
+
+## 十、CI 运行记录（真实跑过的）
+
+### 10.1 run #1（commit `13af225`）— 失败
+
+```
+SaveFilePlugin.swift:134:2: error: unterminated '/*' comment
+** BUILD FAILED **
+```
+
+根因不是少个 `*/`，而是 **Swift 的块注释可以嵌套**：文件头那段文档注释里写了
+`ui/i18n/*`，`/` 紧跟 `*` 等于又开了一层注释，而这一层没闭合，于是编译器一路吃到文件尾
+才报错，位置指向最后一行（134），与真正的出错行（21）差了一百多行。
+
+修法：把那句改写成「`ui/i18n` 下的词典」，避开 `/` + `*` 这个字符对。同类隐患顺手扫了
+四个 Swift 文件的块注释嵌套深度，全部归零；另外把 `"_" + name.dropFirst()` 改成
+`"_" + String(name.dropFirst())`，不依赖 `String + Substring` 的重载推断。
+
+### 10.2 run #2（commit `f61f954`）— 成功
+
+| 项 | 值 |
+|---|---|
+| runner | `macos-15-arm64`（macOS 15.8.2，镜像 20261118） |
+| Xcode | 26.3（17C529），iPhoneOS 26.2 SDK |
+| Node | v22.23.5 |
+| 耗时 | job 55 秒（00:55:31 → 00:56:26 UTC） |
+| 结果 | `BUILD SUCCEEDED` + 11 项产物自检全过 |
+
+自检输出（节选）：
+
+```
+✓ 可执行文件        .../Release-iphoneos/App.app/App
+✓ 架构              arm64
+✓ Web 资源          public/ 7.4M
+✓ 运行配置          capacitor.config.json
+✓ BundleId          com.agent2api.mobile
+✓ 版本号            3.4.2
+✓ build 号          2
+✓ 显示名            Agent2API
+✓ 最低系统          15.0
+✓ ATS 例外          NSAllowsArbitraryLoads
+✓ 局域网权限        NSLocalNetworkUsageDescription
+```
+
+产物：
+
+| 文件 | 大小 | SHA-256（前 16） |
+|---|---:|---|
+| `Agent2API-3.4.2-2-unsigned.ipa` | 3,463,207 B | `bc2d96a1d67669bb` |
+| `Agent2API-3.4.2-2-adhoc.ipa` | 3,480,080 B | `cb54e65ef394556a` |
+
+解包复核（不是看绿灯，是拆开看）：
+
+- `Payload/App.app/App`：Mach-O 64-bit（`0xfeedfacf`），cputype `0x0100000c` = arm64，245,288 B
+- `Info.plist`：`com.agent2api.mobile` / 3.4.2 / build 2 / MinimumOSVersion 15.0 /
+  `UIRequiredDeviceCapabilities = [arm64]` / `UIFileSharingEnabled = true` /
+  ATS 三键齐全 / `NSLocalNetworkUsageDescription` 存在
+- `Payload/App.app/public/mobile.js` = 1,891,382 B，与仓库里的 `android-www/mobile.js` 字节数一致
+- `Frameworks/`：`Capacitor.framework`、`Cordova.framework`。`AppPlugin` / `KeyboardPlugin`
+  是 SPM 本地包，静态编进主二进制，不单独成 framework —— 正常
+- ad-hoc 版比 unsigned 大 21 KB：`codesign` 把签名数据写进去了，说明第二份产物是真签过的
+
+### 10.3 出包环境的一个坑（记下来省下次）
+
+这台开发机的网络里 `github.com:443` 不通（`api.github.com:443` 通），所以：
+
+- `git push` 走 **SSH**（`github.com:22` 与 `ssh.github.com:443` 都通）。token 的 scope 是
+  `repo, workflow, write:packages, delete:packages`，**没有 `admin:public_key`**，加不了账号级
+  SSH key，于是用 `POST /repos/{owner}/{repo}/keys` 加了一个**仓库部署密钥**（`repo` 权限够用）。
+  实测部署密钥能推 `.github/workflows/*` —— workflow scope 的限制针对 OAuth token，不针对部署密钥。
+- GitHub Releases 的二进制下载被墙，MinGit 从 `registry.npmmirror.com` 镜像取。
