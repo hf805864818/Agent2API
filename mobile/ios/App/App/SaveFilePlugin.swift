@@ -18,7 +18,7 @@ import Capacitor
  *
  * 目录名用 `Downloads`（不是中文）：安卓那句提示是「保存到「下载」目录」，
  * 在 iOS 上落到一个真叫 Downloads 的文件夹，文案与事实一致，不用改词表
- * （`ui/i18n/*` 是 `i18n-src/*.json` 的构建产物，包里没有源头，不能手改）。
+ * （`ui/i18n` 下的词典是 `i18n-src` 里 JSON 的构建产物，包里没有源头，不能手改）。
  *
  * ── 返回值 ────────────────────────────────────────────────────
  * `{ ok, filename, bytes, path }`，其中 `path` 是**给人看的相对路径**
@@ -121,7 +121,7 @@ public class SaveFilePlugin: CAPPlugin, CAPBridgedPlugin {
         name = name.components(separatedBy: banned).joined(separator: "_")
 
         if name.isEmpty || name == "." || name == ".." { return nil }
-        if name.hasPrefix(".") { name = "_" + name.dropFirst() }
+        if name.hasPrefix(".") { name = "_" + String(name.dropFirst()) }
         if name.count > 128 { name = String(name.prefix(128)) }
         return name
     }
